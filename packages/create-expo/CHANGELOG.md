@@ -9,6 +9,7 @@
 ### 🎉 New features
 
 - Improved monorepo support ([#46434](https://github.com/expo/expo/pull/46434) by [@douglowder](https://github.com/douglowder))
+- Support OOT prebuild for tvos. ([#46587](https://github.com/expo/expo/pull/46587) by [@douglowder](https://github.com/douglowder))
 
 ### 🐛 Bug fixes
 
