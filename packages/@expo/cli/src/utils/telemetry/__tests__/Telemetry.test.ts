@@ -1,5 +1,19 @@
 import { Telemetry } from '../Telemetry';
 import { commandEvent } from '../events';
+import { getAgentTelemetryContext } from '../utils/agent';
+
+jest.mock('../utils/agent', () => ({
+  getAgentTelemetryContext: jest.fn(),
+}));
+
+const getAgentTelemetryContextMock = getAgentTelemetryContext as jest.MockedFunction<
+  typeof getAgentTelemetryContext
+>;
+
+beforeEach(() => {
+  getAgentTelemetryContextMock.mockReset();
+  getAgentTelemetryContextMock.mockReturnValue({ id: undefined, sessionId: undefined });
+});
 
 it('starts with default detached client', () => {
   const telemetry = new Telemetry({ anonymousId: 'xxx' });
@@ -25,6 +39,9 @@ it('waits until telemetry is initialized', () => {
   expect(client.record).toHaveBeenCalledWith([
     expect.objectContaining({
       userHash: null,
+      context: expect.objectContaining({
+        agent: { id: undefined, sessionId: undefined },
+      }),
     }),
   ]);
 });
@@ -47,6 +64,7 @@ it('preprocesses all records', () => {
       userHash: expect.any(String),
       context: expect.objectContaining({
         sessionId: expect.any(String),
+        agent: { id: undefined, sessionId: undefined },
       }),
     }),
   ]);
@@ -55,6 +73,26 @@ it('preprocesses all records', () => {
   expect(client.record).toHaveBeenCalledWith([
     expect.objectContaining({
       userHash: expect.not.stringMatching('yyy'),
+    }),
+  ]);
+});
+
+it('adds detected agent context to all records', () => {
+  getAgentTelemetryContextMock.mockReturnValue({ id: 'codex', sessionId: 'zzz' });
+
+  const telemetry = new Telemetry({ anonymousId: 'xxx', userId: 'yyy' });
+  const client = mockTelemetryClient(telemetry);
+
+  telemetry.record(commandEvent('start'));
+
+  expect(client.record).toHaveBeenCalledWith([
+    expect.objectContaining({
+      context: expect.objectContaining({
+        agent: {
+          id: 'codex',
+          sessionId: 'zzz',
+        },
+      }),
     }),
   ]);
 });

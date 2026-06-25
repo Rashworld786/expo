@@ -24,8 +24,8 @@ export function getTelemetry(): Telemetry | null {
 
     // Initialize the telemetry
     getUserAsync()
-      .then((actor) => telemetry?.initialize({ userId: actor?.id ?? null }))
-      .catch(() => telemetry?.initialize({ userId: null }));
+      .catch(() => null)
+      .then((actor) => telemetry?.initialize({ userId: actor?.id ?? null }));
   }
 
   return telemetry;
