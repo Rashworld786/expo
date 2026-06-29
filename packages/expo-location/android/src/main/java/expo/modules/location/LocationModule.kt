@@ -36,6 +36,7 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.LocationSettingsRequest
+import com.google.android.gms.location.Priority
 import expo.modules.core.interfaces.ActivityEventListener
 import expo.modules.core.interfaces.LifecycleEventListener
 import expo.modules.core.interfaces.services.UIManager
@@ -65,7 +66,9 @@ import expo.modules.location.records.ReverseGeocodeLocation
 import expo.modules.location.records.ReverseGeocodeResponse
 import expo.modules.location.taskConsumers.GeofencingTaskConsumer
 import expo.modules.location.taskConsumers.LocationTaskConsumer
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.Locale
+import kotlin.collections.emptyList
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
@@ -596,7 +599,7 @@ class LocationModule : Module(), LifecycleEventListener, SensorEventListener, Ac
       )
     } else {
       val locationRequest = LocationRequest.Builder(
-        LocationRequest.PRIORITY_HIGH_ACCURACY,
+        Priority.PRIORITY_HIGH_ACCURACY,
         0L
       ).setMaxUpdates(1)
         .build()
@@ -763,19 +766,34 @@ class LocationModule : Module(), LifecycleEventListener, SensorEventListener, Ac
       throw NoGeocodeException()
     }
 
-    return suspendCoroutine { continuation ->
-      val locations = Geocoder(mContext, Locale.getDefault()).getFromLocationName(address, 1)
-      locations?.let { location ->
-        location.let {
-          val results = it.mapNotNull { address ->
-            val newLocation = Location(LocationManager.GPS_PROVIDER)
-            newLocation.latitude = address.latitude
-            newLocation.longitude = address.longitude
-            GeocodeResponse.from(newLocation)
+    return suspendCancellableCoroutine { continuation ->
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Geocoder(mContext, Locale.getDefault()).getFromLocationName(address, 1) { location ->
+          location.let {
+            val results = it.mapNotNull { address ->
+              val newLocation = Location(LocationManager.GPS_PROVIDER)
+              newLocation.latitude = address.latitude
+              newLocation.longitude = address.longitude
+              GeocodeResponse.from(newLocation)
+            }
+            continuation.resume(results)
+          }
+        }
+      } else {
+        @Suppress("DEPRECATION") // When minSdkVersion is 34, this code will be removed and the above code will be used instead.
+        val locations = Geocoder(mContext, Locale.getDefault()).getFromLocationName(address, 1)
+        locations?.let { addresses ->
+          val results = addresses.mapNotNull { address ->
+            address?.let {
+              val newLocation = Location(LocationManager.GPS_PROVIDER)
+              newLocation.latitude = it.latitude
+              newLocation.longitude = it.longitude
+              GeocodeResponse.from(newLocation)
+            }
           }
           continuation.resume(results)
-        }
-      } ?: continuation.resume(emptyList())
+        } ?: continuation.resume(emptyList())
+      }
     }
   }
 
