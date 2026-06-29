@@ -18,6 +18,8 @@ func validateDisplayName(_ displayName: String?) -> String? {
   return truncateToMaxLength(
     trimmed,
     maxLength: maxDisplayNameLength,
-    warningMessage: "[AppMetrics] logEvent truncated displayName from \(trimmed.count) characters to the \(maxDisplayNameLength)-character limit."
+    warningMessage:
+      "[AppMetrics] logEvent truncated displayName from \(trimmed.count) characters "
+      + "to the \(maxDisplayNameLength)-character limit."
   )
 }

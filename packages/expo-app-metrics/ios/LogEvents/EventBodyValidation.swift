@@ -16,6 +16,8 @@ func validateEventBody(_ body: String?) -> String? {
   return truncateToMaxLength(
     body,
     maxLength: maxEventBodyLength,
-    warningMessage: "[AppMetrics] logEvent truncated body from \(body.count) characters to the \(maxEventBodyLength)-character limit."
+    warningMessage:
+      "[AppMetrics] logEvent truncated body from \(body.count) characters "
+      + "to the \(maxEventBodyLength)-character limit."
   )
 }
