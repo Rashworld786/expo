@@ -11,6 +11,7 @@
 - Capture unhandled JavaScript errors on iOS and Android by wrapping React Native's `global.ErrorUtils` handler, recording each as an `exception` log event following OpenTelemetry's exception conventions (`exception.type`/`exception.message`/`exception.stacktrace`). Fatal errors are written to disk synchronously before the process terminates and ingested on the next launch. ([#46923](https://github.com/expo/expo/pull/46923) by [@tsapeta](https://github.com/tsapeta))
 - Add android crash reports ([#46869](https://github.com/expo/expo/pull/46869) by [@Ubax](https://github.com/Ubax))
 - Record an `expo.memory.warning` log event on iOS when the system delivers a low-memory warning, carrying the memory usage snapshot (`expo.memory.*`) taken at warning time. ([#47108](https://github.com/expo/expo/pull/47108) by [@tsapeta](https://github.com/tsapeta))
+- Capture React render-phase errors via the new `AppMetricsErrorBoundary`, recorded as non-fatal `exception` log events with the React component stack (`expo.error.component_stack`). Place it around any subtree with a `fallback`, or pass `errorBoundaryFallback` to `AppMetricsRoot` to mount one at the root. ([#47038](https://github.com/expo/expo/pull/47038) by [@tsapeta](https://github.com/tsapeta))
 
 ### 🐛 Bug fixes
 

@@ -10,11 +10,13 @@ struct ErrorReport {
   var type: String?
   var message: String = ""
   var stacktrace: String?
+  var componentStack: String?
   var isFatal: Bool = false
 
   /// How the error was captured. A closed set so the `expo.error.source` attribute stays consistent.
   enum Source: String, Enumerable {
     case global
+    case errorBoundary
   }
 
   /// Builds the `exception` log event for the live path.
@@ -24,6 +26,7 @@ struct ErrorReport {
       type: type,
       message: message,
       stacktrace: stacktrace,
+      componentStack: componentStack,
       isFatal: isFatal
     )
   }
@@ -36,6 +39,7 @@ struct ErrorReport {
       type: type,
       message: message,
       stacktrace: stacktrace,
+      componentStack: componentStack,
       sessionId: sessionId,
       timestamp: Date.now.ISO8601Format()
     )
@@ -51,6 +55,7 @@ extension PendingErrorStore.PendingError {
       type: type,
       message: message,
       stacktrace: stacktrace,
+      componentStack: componentStack,
       isFatal: true,
       timestamp: timestamp
     )
@@ -70,6 +75,7 @@ private func makeExceptionLogRecord(
   type: String?,
   message: String,
   stacktrace: String?,
+  componentStack: String?,
   isFatal: Bool,
   timestamp: String = Date.now.ISO8601Format()
 ) -> LogRecord {
@@ -79,6 +85,7 @@ private func makeExceptionLogRecord(
     "exception.type": type as Any,
     "exception.message": message,
     "exception.stacktrace": stacktrace as Any,
+    "expo.error.component_stack": componentStack as Any,
   ]
   return LogRecord(
     name: "exception",

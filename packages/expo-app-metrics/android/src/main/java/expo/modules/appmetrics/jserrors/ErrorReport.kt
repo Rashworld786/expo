@@ -19,6 +19,7 @@ data class ErrorReport(
   @Field val type: String? = null,
   @Field val message: String = "",
   @Field val stacktrace: String? = null,
+  @Field val componentStack: String? = null,
   @Field val isFatal: Boolean = false
 ) : Record {
   /** Builds the `exception` log event for the live path. */
@@ -29,6 +30,7 @@ data class ErrorReport(
       type = type,
       message = message,
       stacktrace = stacktrace,
+      componentStack = componentStack,
       isFatal = isFatal
     )
 
@@ -42,6 +44,7 @@ data class ErrorReport(
       type = type,
       message = message,
       stacktrace = stacktrace,
+      componentStack = componentStack,
       sessionId = sessionId,
       timestamp = TimeUtils.getCurrentTimestampInISOFormat()
     )
@@ -49,7 +52,8 @@ data class ErrorReport(
 
 /** How the error was captured. A closed set so the `expo.error.source` attribute stays consistent. */
 enum class ErrorSource(val rawValue: String) : Enumerable {
-  GLOBAL("global")
+  GLOBAL("global"),
+  ERROR_BOUNDARY("errorBoundary")
 }
 
 /**
@@ -63,6 +67,7 @@ fun PendingErrorStore.PendingError.toLogRecord(): LogRecord =
     type = type,
     message = message,
     stacktrace = stacktrace,
+    componentStack = componentStack,
     isFatal = true,
     timestamp = timestamp
   )
@@ -83,6 +88,7 @@ private fun makeExceptionLogRecord(
   type: String?,
   message: String,
   stacktrace: String?,
+  componentStack: String?,
   isFatal: Boolean,
   timestamp: String = TimeUtils.getCurrentTimestampInISOFormat()
 ): LogRecord {
@@ -91,7 +97,8 @@ private fun makeExceptionLogRecord(
     "expo.error.is_fatal" to isFatal,
     "exception.type" to type,
     "exception.message" to message,
-    "exception.stacktrace" to stacktrace
+    "exception.stacktrace" to stacktrace,
+    "expo.error.component_stack" to componentStack
   )
   return LogRecord(
     sessionId = sessionId,
