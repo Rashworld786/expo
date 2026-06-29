@@ -1,20 +1,43 @@
-import type { LoadedImage } from '../observe';
+import type { ExpoAppMetricsModuleType } from 'expo-app-metrics';
+import { requireOptionalNativeModule } from 'expo-modules-core';
+import type { ObserveModule, ObserveModuleEvents } from 'expo-observe';
+import { Dimensions, PixelRatio } from 'react-native';
 
-// The `ExpoObserve` native module: supplies the config and the `onConfigure` event.
-type FakeObserve = {
-  getIntegrations: jest.Mock;
-  addListener: jest.Mock;
+import type { ImageModuleEvents, ImageNativeModule } from '../Image.types';
+import {
+  activate,
+  handleImageLoaded,
+  initObserveIntegrationIfNeeded,
+  initObserveIntegrationIfNeededImpl,
+  reportIfOversized,
+} from '../observe';
+import type { IntegrationState, LoadedImage } from '../observe';
+
+jest.mock('expo-modules-core', () => ({
+  ...jest.requireActual('expo-modules-core'),
+  requireOptionalNativeModule: jest.fn(),
+}));
+
+const requireNativeModule = requireOptionalNativeModule as unknown as jest.Mock;
+let getScreen: jest.SpyInstance;
+let getPixelRatio: jest.SpyInstance;
+
+function screenSize(width: number, height: number) {
+  return { width, height } as unknown as ReturnType<typeof Dimensions.get>;
+}
+
+type MockOf<T> = { [K in keyof T]: jest.Mock };
+
+const ON_CONFIGURE = 'onConfigure' satisfies keyof ObserveModuleEvents;
+const ON_IMAGE_LOADED = 'onImageLoaded' satisfies keyof ImageModuleEvents;
+
+type FakeObserve = MockOf<Pick<ObserveModule, 'getIntegrations' | 'addListener'>> & {
   emit: (name: string, payload: unknown) => void;
 };
 
-// The `ExpoAppMetrics` native module: `logEvent` lives here, not on `ExpoObserve`.
-type FakeAppMetrics = { logEvent: jest.Mock };
+type FakeAppMetrics = MockOf<Pick<ExpoAppMetricsModuleType, 'logEvent'>>;
 
-// The `ExpoImage` native module: emits `onImageLoaded`. `observe.ts` subscribes to it while the
-// integration is enabled. Captures the subscriber so a test can drive an emission, and exposes the
-// shared `remove` mock so unsubscription can be asserted.
-type FakeImageModule = {
-  addListener: jest.Mock;
+type FakeImageModule = MockOf<Pick<ImageNativeModule, 'addListener'>> & {
   remove: jest.Mock;
   emit: (name: string, payload: unknown) => void;
 };
@@ -33,6 +56,10 @@ function makeObserve(integrations: Record<string, unknown>): FakeObserve {
   };
 }
 
+function makeAppMetrics(): FakeAppMetrics {
+  return { logEvent: jest.fn() };
+}
+
 function makeImageModule(): FakeImageModule {
   const listeners: Record<string, ((payload: unknown) => void)[]> = {};
   const remove = jest.fn();
@@ -48,49 +75,50 @@ function makeImageModule(): FakeImageModule {
   };
 }
 
-// Re-import `observe.ts` with a fresh module state and controlled mocks so each test observes
-// activation/dedup/subscription from a clean slate. `requireOptionalNativeModule` (from
-// `expo-modules-core`) is keyed on module name so the three native modules (`ExpoObserve` for config,
-// `ExpoAppMetrics` for `logEvent`, `ExpoImage` for the `onImageLoaded` event) stay separate — each
-// can independently be absent. `react-native` is mocked so `handleImageLoaded` reads a fixed screen.
-function loadObserveModule(
-  observe: FakeObserve | null,
-  appMetrics: FakeAppMetrics | null = { logEvent: jest.fn() },
-  imageModule: FakeImageModule = makeImageModule(),
-  screen = { width: 100, height: 100 },
-  pixelRatio = 1
-) {
-  let mod: typeof import('../observe');
-  jest.isolateModules(() => {
-    jest.doMock('expo-modules-core', () => ({
-      requireOptionalNativeModule: (name: string) => {
-        if (name === 'ExpoObserve') return observe;
-        if (name === 'ExpoImage') return imageModule;
-        return appMetrics;
-      },
-    }));
-    // Give `handleImageLoaded` a deterministic screen across all four platform projects. The
-    // mechanism that works differs per preset (`doMock` takes on iOS/Android; `spyOn` on the real
-    // singleton takes on Node/Web), so apply both — whichever the project honors wins.
-    jest.doMock('react-native', () => ({
-      Dimensions: { get: () => screen },
-      PixelRatio: { get: () => pixelRatio },
-    }));
-    const { Dimensions, PixelRatio } = require('react-native');
-    jest.spyOn(Dimensions, 'get').mockReturnValue(screen as ReturnType<typeof Dimensions.get>);
-    jest.spyOn(PixelRatio, 'get').mockReturnValue(pixelRatio);
-    mod = require('../observe');
-  });
-  jest.dontMock('expo-modules-core');
-  jest.dontMock('react-native');
-  return { reportIfOversized: mod!.reportIfOversized, logEvent: appMetrics?.logEvent, imageModule };
+function mockNativeModules({
+  observe = null,
+  appMetrics = null,
+  imageModule = null,
+}: {
+  observe?: FakeObserve | null;
+  appMetrics?: FakeAppMetrics | null;
+  imageModule?: FakeImageModule | null;
+}) {
+  requireNativeModule.mockImplementation((name: string) =>
+    name === 'ExpoObserve' ? observe : name === 'ExpoImage' ? imageModule : appMetrics
+  );
 }
 
-// Restore the `Dimensions`/`PixelRatio` spies installed by `loadObserveModule`.
+beforeEach(() => {
+  getScreen = jest.spyOn(Dimensions, 'get').mockReturnValue(screenSize(100, 100));
+  getPixelRatio = jest.spyOn(PixelRatio, 'get').mockReturnValue(1);
+  requireNativeModule.mockReset();
+  requireNativeModule.mockReturnValue(null);
+});
+
 afterEach(() => jest.restoreAllMocks());
 
-// The caller passes the screen size; the tests fix it at 100×100pt @1x, a budget of 10000px²
-// (width × height × pixel ratio). Override `pixelRatio` to exercise the scaling.
+function state(
+  over: Partial<{
+    enabled: boolean;
+    threshold: number;
+    reported: Set<string>;
+    subscription: { remove: () => void } | null;
+    appMetrics: FakeAppMetrics | null;
+    imageModule: FakeImageModule | null;
+  }> = {}
+): IntegrationState {
+  return {
+    enabled: true,
+    threshold: 2,
+    reported: new Set<string>(),
+    subscription: null,
+    appMetrics: makeAppMetrics(),
+    imageModule: makeImageModule(),
+    ...over,
+  } as unknown as IntegrationState;
+}
+
 function image(
   width: number,
   height = width,
@@ -102,14 +130,16 @@ function image(
 
 describe('reportIfOversized', () => {
   it('logs a warning once when the image area exceeds the screen budget times the ratio', () => {
-    const observe = makeObserve({ 'expo-image': { ratio: 3 } });
-    const { reportIfOversized, logEvent } = loadObserveModule(observe);
+    const appMetrics = makeAppMetrics();
 
     // budget 10000 × ratio 3 = 30000; 200×200 = 40000 > 30000
-    reportIfOversized(image(200, 200, 'https://example.com/a.png', 1));
+    reportIfOversized(
+      state({ threshold: 3, appMetrics }),
+      image(200, 200, 'https://example.com/a.png', 1)
+    );
 
-    expect(logEvent).toHaveBeenCalledTimes(1);
-    const [name, options] = logEvent!.mock.calls[0];
+    expect(appMetrics.logEvent).toHaveBeenCalledTimes(1);
+    const [name, options] = appMetrics.logEvent.mock.calls[0];
     expect(name).toBe('expo-image.oversized');
     expect(options.severity).toBe('warn');
     expect(options.attributes).toMatchObject({
@@ -123,188 +153,219 @@ describe('reportIfOversized', () => {
   });
 
   it('does not log when the image area is within the budget', () => {
-    const observe = makeObserve({ 'expo-image': { ratio: 3 } });
-    const { reportIfOversized, logEvent } = loadObserveModule(observe);
+    const appMetrics = makeAppMetrics();
 
     // budget 10000 × ratio 3 = 30000; 150×150 = 22500 < 30000
-    reportIfOversized(image(150));
+    reportIfOversized(state({ threshold: 3, appMetrics }), image(150));
 
-    expect(logEvent).not.toHaveBeenCalled();
-  });
-
-  it('uses the default ratio of 2 when enabled with `true`', () => {
-    const observe = makeObserve({ 'expo-image': true });
-    const { reportIfOversized, logEvent } = loadObserveModule(observe);
-
-    // budget 10000 × ratio 2 = 20000; 150×150 = 22500 > 20000
-    reportIfOversized(image(150));
-
-    expect(logEvent).toHaveBeenCalledTimes(1);
+    expect(appMetrics.logEvent).not.toHaveBeenCalled();
   });
 
   it('scales the budget by the device pixel ratio', () => {
-    // screen 100×100pt @3x → budget 30000; default ratio 2 → 60000
-    const observe = makeObserve({ 'expo-image': true });
-    const { reportIfOversized, logEvent } = loadObserveModule(observe);
+    const appMetrics = makeAppMetrics();
+    const s = state({ threshold: 2, appMetrics });
 
-    reportIfOversized(image(200, 200, 'https://example.com/a.png', 3)); // 40000 < 60000
-    expect(logEvent).not.toHaveBeenCalled();
+    // screen 100×100 @3x → budget 30000; ratio 2 → 60000
+    reportIfOversized(s, image(200, 200, 'https://example.com/a.png', 3)); // 40000 < 60000
+    expect(appMetrics.logEvent).not.toHaveBeenCalled();
 
-    reportIfOversized(image(300, 300, 'https://example.com/b.png', 3)); // 90000 > 60000
-    expect(logEvent).toHaveBeenCalledTimes(1);
+    reportIfOversized(s, image(300, 300, 'https://example.com/b.png', 3)); // 90000 > 60000
+    expect(appMetrics.logEvent).toHaveBeenCalledTimes(1);
   });
 
   it('does not log when the integration is not enabled', () => {
-    const observe = makeObserve({}); // no 'expo-image' key
-    const { reportIfOversized, logEvent } = loadObserveModule(observe);
+    const appMetrics = makeAppMetrics();
 
-    reportIfOversized(image(1000));
+    reportIfOversized(state({ enabled: false, appMetrics }), image(1000));
 
-    expect(logEvent).not.toHaveBeenCalled();
-  });
-
-  it('does not log when the integration is disabled with `false`', () => {
-    const observe = makeObserve({ 'expo-image': false });
-    const { reportIfOversized, logEvent } = loadObserveModule(observe);
-
-    reportIfOversized(image(1000));
-
-    expect(logEvent).not.toHaveBeenCalled();
-  });
-
-  it('activates from a later `onConfigure` event', () => {
-    const observe = makeObserve({}); // disabled at load
-    const { reportIfOversized, logEvent } = loadObserveModule(observe);
-
-    reportIfOversized(image(1000));
-    expect(logEvent).not.toHaveBeenCalled();
-
-    observe.emit('onConfigure', { integrations: { 'expo-image': { ratio: 2 } } });
-    reportIfOversized(image(1000, 1000, 'https://example.com/b.png'));
-    expect(logEvent).toHaveBeenCalledTimes(1);
+    expect(appMetrics.logEvent).not.toHaveBeenCalled();
   });
 
   it('reports each source url at most once', () => {
-    const observe = makeObserve({ 'expo-image': { ratio: 2 } });
-    const { reportIfOversized, logEvent } = loadObserveModule(observe);
+    const appMetrics = makeAppMetrics();
+    const s = state({ threshold: 2, appMetrics });
 
-    reportIfOversized(image(1000));
-    reportIfOversized(image(1000));
+    reportIfOversized(s, image(1000));
+    reportIfOversized(s, image(1000));
 
-    expect(logEvent).toHaveBeenCalledTimes(1);
-  });
-
-  it('clears the dedup set on a new configure so a reported url can report again', () => {
-    const observe = makeObserve({ 'expo-image': { ratio: 2 } });
-    const { reportIfOversized, logEvent } = loadObserveModule(observe);
-
-    reportIfOversized(image(1000));
-    expect(logEvent).toHaveBeenCalledTimes(1);
-
-    observe.emit('onConfigure', { integrations: { 'expo-image': { ratio: 2 } } });
-    reportIfOversized(image(1000));
-    expect(logEvent).toHaveBeenCalledTimes(2);
-  });
-
-  it('is a no-op when expo-observe is not installed', () => {
-    const { reportIfOversized } = loadObserveModule(null);
-
-    expect(() => reportIfOversized(image(1000))).not.toThrow();
-  });
-
-  it('is a no-op when expo-observe is present but app-metrics is not', () => {
-    const observe = makeObserve({ 'expo-image': { ratio: 2 } });
-    const { reportIfOversized } = loadObserveModule(observe, null);
-
-    expect(() => reportIfOversized(image(1000))).not.toThrow();
-  });
-
-  it('does not log when the area exactly equals the budget times the ratio', () => {
-    const observe = makeObserve({ 'expo-image': { ratio: 2 } });
-    const { reportIfOversized, logEvent } = loadObserveModule(observe);
-
-    // budget 10000 × ratio 2 = 20000; 200×100 = 20000 — strictly greater is required
-    reportIfOversized(image(200, 100));
-
-    expect(logEvent).not.toHaveBeenCalled();
-  });
-
-  it('does not log or throw when the image has no measurable size', () => {
-    const observe = makeObserve({ 'expo-image': { ratio: 2 } });
-    const { reportIfOversized, logEvent } = loadObserveModule(observe);
-
-    expect(() => reportIfOversized(image(0))).not.toThrow();
-    expect(logEvent).not.toHaveBeenCalled();
+    expect(appMetrics.logEvent).toHaveBeenCalledTimes(1);
   });
 
   it('reports distinct oversized urls independently', () => {
-    const observe = makeObserve({ 'expo-image': { ratio: 2 } });
-    const { reportIfOversized, logEvent } = loadObserveModule(observe);
+    const appMetrics = makeAppMetrics();
+    const s = state({ threshold: 2, appMetrics });
 
-    reportIfOversized(image(1000, 1000, 'https://example.com/a.png'));
-    reportIfOversized(image(1000, 1000, 'https://example.com/b.png'));
+    reportIfOversized(s, image(1000, 1000, 'https://example.com/a.png'));
+    reportIfOversized(s, image(1000, 1000, 'https://example.com/b.png'));
 
-    expect(logEvent).toHaveBeenCalledTimes(2);
+    expect(appMetrics.logEvent).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not log when the area exactly equals the budget times the ratio', () => {
+    const appMetrics = makeAppMetrics();
+
+    // budget 10000 × ratio 2 = 20000; 200×100 = 20000 — strictly greater is required
+    reportIfOversized(state({ threshold: 2, appMetrics }), image(200, 100));
+
+    expect(appMetrics.logEvent).not.toHaveBeenCalled();
+  });
+
+  it('does not log or throw when the image has no measurable size', () => {
+    const appMetrics = makeAppMetrics();
+
+    expect(() => reportIfOversized(state({ appMetrics }), image(0))).not.toThrow();
+    expect(appMetrics.logEvent).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when app-metrics is not installed', () => {
+    expect(() => reportIfOversized(state({ appMetrics: null }), image(1000))).not.toThrow();
+  });
+
+  it('does not throw when logEvent fails', () => {
+    const appMetrics: FakeAppMetrics = {
+      logEvent: jest.fn(() => {
+        throw new Error('logEvent failed');
+      }),
+    };
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    expect(() => reportIfOversized(state({ appMetrics }), image(1000))).not.toThrow();
+    expect(warn).toHaveBeenCalled();
   });
 });
 
-describe('onImageLoaded subscription', () => {
-  it('subscribes to the native event when the integration is enabled', () => {
-    const observe = makeObserve({ 'expo-image': true });
-    const { imageModule } = loadObserveModule(observe);
+describe('handleImageLoaded', () => {
+  it('pairs the loaded image with the current screen size and forwards it to report', () => {
+    getScreen.mockReturnValue(screenSize(120, 240));
+    getPixelRatio.mockReturnValue(3);
+    const report = jest.fn();
+    const s = state();
 
-    expect(imageModule.addListener).toHaveBeenCalledWith('onImageLoaded', expect.any(Function));
+    handleImageLoaded(s, { url: 'https://example.com/a.png', width: 300, height: 300 }, report);
+
+    expect(report).toHaveBeenCalledWith(s, {
+      url: 'https://example.com/a.png',
+      width: 300,
+      height: 300,
+      screenWidth: 120,
+      screenHeight: 240,
+      pixelRatio: 3,
+    });
+  });
+});
+
+describe('activate', () => {
+  it('enables and subscribes, reading the ratio from an object config', () => {
+    const imageModule = makeImageModule();
+    const s = state({ enabled: false, imageModule });
+
+    activate(s, { 'expo-image': { ratio: 3 } });
+
+    expect(s.enabled).toBe(true);
+    expect(s.threshold).toBe(3);
+    expect(s.subscription).not.toBeNull();
+    expect(imageModule.addListener).toHaveBeenCalledWith(ON_IMAGE_LOADED, expect.any(Function));
   });
 
-  it('does not subscribe when the integration is disabled', () => {
-    const observe = makeObserve({});
-    const { imageModule } = loadObserveModule(observe);
+  it('uses the default ratio of 2 when enabled with `true`', () => {
+    const s = state({ enabled: false });
 
+    activate(s, { 'expo-image': true });
+
+    expect(s.enabled).toBe(true);
+    expect(s.threshold).toBe(2);
+  });
+
+  it('does not enable or subscribe when the config is absent', () => {
+    const imageModule = makeImageModule();
+    const s = state({ enabled: false, imageModule });
+
+    activate(s, {});
+
+    expect(s.enabled).toBe(false);
     expect(imageModule.addListener).not.toHaveBeenCalled();
   });
 
-  it('subscribes only once across repeated enabling configures', () => {
-    const observe = makeObserve({ 'expo-image': true });
-    const { imageModule } = loadObserveModule(observe);
+  it('does not enable when disabled with `false`', () => {
+    const s = state({ enabled: false });
 
-    observe.emit('onConfigure', { integrations: { 'expo-image': { ratio: 4 } } });
+    activate(s, { 'expo-image': false });
+
+    expect(s.enabled).toBe(false);
+  });
+
+  it('resets the dedup set so a previously reported url can report again', () => {
+    const reported = new Set(['https://example.com/a.png']);
+    const s = state({ reported });
+
+    activate(s, { 'expo-image': true });
+
+    expect(s.reported.size).toBe(0);
+    expect(s.reported).not.toBe(reported);
+  });
+
+  it('subscribes only once across repeated enabling configures', () => {
+    const imageModule = makeImageModule();
+    const s = state({ enabled: false, imageModule });
+
+    activate(s, { 'expo-image': true });
+    activate(s, { 'expo-image': { ratio: 4 } });
 
     expect(imageModule.addListener).toHaveBeenCalledTimes(1);
+    expect(s.threshold).toBe(4);
   });
 
   it('unsubscribes when a later configure disables the integration', () => {
-    const observe = makeObserve({ 'expo-image': true });
-    const { imageModule } = loadObserveModule(observe);
+    const remove = jest.fn();
+    const s = state({ enabled: true, subscription: { remove } });
 
-    observe.emit('onConfigure', { integrations: {} });
+    activate(s, {});
 
-    expect(imageModule.remove).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(s.subscription).toBeNull();
   });
 
   it('re-subscribes after being disabled and enabled again', () => {
-    const observe = makeObserve({ 'expo-image': true });
-    const { imageModule } = loadObserveModule(observe);
+    const imageModule = makeImageModule();
+    const s = state({ enabled: false, imageModule });
 
-    observe.emit('onConfigure', { integrations: {} });
-    observe.emit('onConfigure', { integrations: { 'expo-image': true } });
+    activate(s, { 'expo-image': true });
+    activate(s, {});
+    activate(s, { 'expo-image': true });
 
     expect(imageModule.addListener).toHaveBeenCalledTimes(2);
   });
 
-  it('routes a native onImageLoaded event through reportIfOversized', () => {
-    const observe = makeObserve({ 'expo-image': true });
+  it('routes a native onImageLoaded event to the injected handler', () => {
     const imageModule = makeImageModule();
-    // screen 100×100pt @1x → budget 10000; default ratio 2 → 20000
-    const { logEvent } = loadObserveModule(observe, { logEvent: jest.fn() }, imageModule);
+    const handle = jest.fn();
+    const s = state({ enabled: false, imageModule });
 
-    imageModule.emit('onImageLoaded', {
+    activate(s, { 'expo-image': true }, handle);
+    imageModule.emit(ON_IMAGE_LOADED, { url: 'https://example.com/a.png', width: 1, height: 1 });
+
+    expect(handle).toHaveBeenCalledWith(s, {
+      url: 'https://example.com/a.png',
+      width: 1,
+      height: 1,
+    });
+  });
+
+  it('routes a native onImageLoaded event through the default handler to logEvent', () => {
+    // screen 100×100pt @1x → budget 10000; default ratio 2 → 20000
+    const appMetrics = makeAppMetrics();
+    const imageModule = makeImageModule();
+    const s = state({ enabled: false, appMetrics, imageModule });
+
+    activate(s, { 'expo-image': true });
+    imageModule.emit(ON_IMAGE_LOADED, {
       url: 'https://example.com/big.png',
       width: 300,
       height: 300,
     });
 
-    expect(logEvent).toHaveBeenCalledTimes(1);
-    expect(logEvent!.mock.calls[0][1].attributes).toMatchObject({
+    expect(appMetrics.logEvent).toHaveBeenCalledTimes(1);
+    expect(appMetrics.logEvent.mock.calls[0][1].attributes).toMatchObject({
       url: 'https://example.com/big.png',
       imageWidth: 300,
       imageHeight: 300,
@@ -312,5 +373,76 @@ describe('onImageLoaded subscription', () => {
       screenHeight: 100,
       pixelRatio: 1,
     });
+  });
+});
+
+describe('initObserveIntegrationIfNeededImpl', () => {
+  it('activates with the current integrations on load', () => {
+    const observe = makeObserve({ 'expo-image': { ratio: 3 } });
+    mockNativeModules({ observe });
+    const activateSpy = jest.fn();
+
+    initObserveIntegrationIfNeededImpl(activateSpy);
+
+    expect(activateSpy).toHaveBeenCalledTimes(1);
+    expect(activateSpy.mock.calls[0][1]).toEqual({ 'expo-image': { ratio: 3 } });
+  });
+
+  it('re-activates on each later onConfigure event', () => {
+    const observe = makeObserve({});
+    mockNativeModules({ observe });
+    const activateSpy = jest.fn();
+
+    initObserveIntegrationIfNeededImpl(activateSpy);
+    observe.emit(ON_CONFIGURE, { integrations: { 'expo-image': { ratio: 2 } } });
+
+    expect(activateSpy).toHaveBeenCalledTimes(2);
+    expect(activateSpy.mock.calls[1][1]).toEqual({ 'expo-image': { ratio: 2 } });
+  });
+
+  it('passes the same state object to every activate call', () => {
+    const observe = makeObserve({});
+    mockNativeModules({ observe });
+    const activateSpy = jest.fn();
+
+    initObserveIntegrationIfNeededImpl(activateSpy);
+    observe.emit(ON_CONFIGURE, { integrations: { 'expo-image': true } });
+
+    expect(activateSpy.mock.calls[1][0]).toBe(activateSpy.mock.calls[0][0]);
+  });
+
+  it('resolves and threads the native modules into state', () => {
+    const observe = makeObserve({ 'expo-image': true });
+    const appMetrics = makeAppMetrics();
+    const imageModule = makeImageModule();
+    mockNativeModules({ observe, appMetrics, imageModule });
+    const activateSpy = jest.fn();
+
+    initObserveIntegrationIfNeededImpl(activateSpy);
+
+    const passedState = activateSpy.mock.calls[0][0];
+    expect(passedState.appMetrics).toBe(appMetrics);
+    expect(passedState.imageModule).toBe(imageModule);
+  });
+
+  it('is a no-op when expo-observe is not installed', () => {
+    // `requireNativeModule` resolves to `null` by default (see `beforeEach`).
+    const activateSpy = jest.fn();
+
+    initObserveIntegrationIfNeededImpl(activateSpy);
+
+    expect(activateSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('initObserveIntegrationIfNeeded', () => {
+  it('runs the impl at most once across repeated calls', () => {
+    const observe = makeObserve({ 'expo-image': true });
+    mockNativeModules({ observe, appMetrics: makeAppMetrics(), imageModule: makeImageModule() });
+
+    initObserveIntegrationIfNeeded();
+    initObserveIntegrationIfNeeded();
+
+    expect(observe.getIntegrations).toHaveBeenCalledTimes(1);
   });
 });

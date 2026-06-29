@@ -67,13 +67,6 @@ export type ObserveConfig = {
   integrations?: ObserveIntegrationsConfig;
 };
 
-/**
- * Per-integration opt-in flags. Declared as an `interface` so integration
- * libraries living in their own packages can register their entry through
- * TypeScript declaration merging — e.g. `expo-image` adds an `'expo-image'`
- * key via `declare module 'expo-observe'`. `expo-observe` itself takes no
- * dependency on those packages.
- */
 export interface ObserveIntegrationsConfig {
   /**
    * Enables the `expo-router` integration, which records navigation metrics
@@ -103,9 +96,7 @@ export interface ObserveIntegrationsConfig {
 export type ObserveModuleEvents = {
   /**
    * Fired on every `configure(...)` call, carrying the resolved `integrations`
-   * config. Integration libraries (e.g. `expo-image`) subscribe to this to
-   * activate themselves; `getIntegrations()` returns the same config for
-   * listeners that attach after `configure` already ran.
+   * config
    */
   onConfigure: (payload: { integrations: ObserveIntegrationsConfig }) => void;
 };
@@ -113,15 +104,12 @@ export type ObserveModuleEvents = {
 export declare class ObserveModule extends NativeModule<ObserveModuleEvents> {
   dispatchEvents(): Promise<void>;
   /**
-   * Configures observability settings. Emits the `onConfigure` event with the
-   * resolved `integrations` config so integration libraries can activate.
+   * Configures observability settings.
    */
   configure(config: ObserveConfig): void;
   /**
    * Returns the `integrations` config from the most recent `configure(...)`
-   * call, or an empty object if `configure` has not run yet. Lets a listener
-   * that attaches after `configure` read the current state without waiting for
-   * the next `onConfigure` event.
+   * call, or an empty object if `configure` has not run yet.
    */
   getIntegrations(): ObserveIntegrationsConfig;
   /**
